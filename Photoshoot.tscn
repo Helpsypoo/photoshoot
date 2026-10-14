@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3 uid="uid://c80mcvqju5ahj"]
 
-[ext_resource type="Script" path="res://addons/Photoshoot/Photoshoot.cs" id="1_script"]
-[ext_resource type="Script" path="res://addons/Photoshoot/PhotoshootSubject.cs" id="2_subject"]
+[ext_resource type="Script" uid="uid://ds2dc1h4puayq" path="res://addons/Photoshoot/Photoshoot.cs" id="1_script"]
+[ext_resource type="Script" uid="uid://dt3xhvnlp6bai" path="res://addons/Photoshoot/PhotoshootSubject.cs" id="2_subject"]
 
 [sub_resource type="Resource" id="Subject_inline"]
 script = ExtResource("2_subject")
