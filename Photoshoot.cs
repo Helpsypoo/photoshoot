@@ -3,17 +3,19 @@ using System.Threading.Tasks;
 
 // Photoshoot: render a subject to PNG with a transparent background. Runs as a
 // [Tool] so the configured subject appears in the editor for framing, posing,
-// and animation scrubbing. Assign a PhotoshootSubject via the inspector
-// (ManualPhotoshootSubject, or one of your project's own subjects), frame the
-// shot (Fit Camera gives a starting point), click Snap Picture to write the PNG
-// at the path the subject supplies.
+// and animation scrubbing. Set a PhotoshootSubject in the inspector (a .tres or
+// one made inline: the scene to load, the save path, whether to strip scripts,
+// a rotation), frame the shot (Fit Camera gives a starting point), click Snap
+// Picture to write the PNG at the subject's save path.
 //
 // Capture is meant to happen in the editor, so tweaked poses aren't overwritten
 // by AnimationPlayer autoplay. SnapPicture and FitCamera are public all the
 // same, so a project's batch script can run the scene and snap a list of
 // subjects without the editor.
 //
-// The instantiated model is owned by the scene root so its subtree is editable.
+// The loaded model is owned by the scene root so its subtree is editable in the
+// Scene dock. For a save of the scene the slot's children are disowned, so
+// they are never written into the .tscn, and claimed back afterwards.
 [Tool]
 public partial class Photoshoot : Node
 {
@@ -32,15 +34,17 @@ public partial class Photoshoot : Node
     }
 
     // Extra room left around the subject by Fit Camera, as a multiplier on the
-    // distance that would just fit its bounding sphere. 1 touches the edges.
+    // distance that would just fit its bounds. 1 touches the edges.
     [Export(PropertyHint.Range, "1,3,0.05")]
     public float FitPadding { get; set; } = 1.15f;
 
     [ExportToolButton("Fit Camera")]
     public Callable FitCameraButton => Callable.From(FitCamera);
 
+    // A statement lambda: an expression lambda would hand the Task back to
+    // Godot, which can't turn it into a Variant.
     [ExportToolButton("Snap Picture")]
-    public Callable SnapPictureButton => Callable.From(() => _ = SnapPicture());
+    public Callable SnapPictureButton => Callable.From(() => { _ = SnapPicture(); });
 
     // Lazy accessors. The node references are re-resolved from %-unique-names
     // on demand because [Tool] Photoshoot can receive inspector edits before
@@ -95,6 +99,14 @@ public partial class Photoshoot : Node
         ReloadModel();
     }
 
+    public override void _Notification(int what)
+    {
+        // The editor tells every node of the scene before and after it writes the
+        // .tscn. Nodes with no owner are left out of the file.
+        if (what == NotificationEditorPreSave) SetSlotOwner(null);
+        else if (what == NotificationEditorPostSave) ClaimOwnership(ModelSlot);
+    }
+
     private void OnSubjectChanged()
     {
         ReloadModel();
@@ -108,20 +120,23 @@ public partial class Photoshoot : Node
         ClaimOwnership(slot);
     }
 
-    // Give every loaded node (and its descendants) Owner = edited scene root so
-    // the subtree is visible and editable in the Scene dock while framing the
-    // shot. Editor-only — outside the editor, Owner is meaningless for behavior.
-    //
-    // Note: saving the scene while a model is loaded will persist these nodes
-    // into the .tscn. Reloading (re-open / re-assign Subject) wipes them again,
-    // so in practice this just means "don't Ctrl-S while a subject is loaded."
+    // Give every node under the slot Owner = edited scene root so the subtree
+    // is visible and editable in the Scene dock while framing the shot.
+    // Editor-only: outside the editor, Owner is meaningless for behavior.
     private void ClaimOwnership(Node3D slot)
     {
         if (!Engine.IsEditorHint()) return;
         var root = GetTree()?.EditedSceneRoot;
-        if (root == null) return;
+        if (root == null || slot == null) return;
+        SetSlotOwner(root);
+    }
+
+    private void SetSlotOwner(Node owner)
+    {
+        var slot = ModelSlot;
+        if (slot == null) return;
         foreach (Node child in slot.GetChildren())
-            SetOwnerRecursive(child, root);
+            SetOwnerRecursive(child, owner);
     }
 
     private static void SetOwnerRecursive(Node node, Node owner)
@@ -203,7 +218,8 @@ public partial class Photoshoot : Node
 
     // Renders the subject and writes the PNG where the subject says. Awaits the
     // next drawn frame first, so a model loaded or a camera moved this frame is
-    // in the picture.
+    // in the picture. In the editor the file is then reimported, so an open
+    // scene using the texture shows the new picture at once.
     public async Task SnapPicture()
     {
         var viewport = Viewport;
@@ -214,7 +230,11 @@ public partial class Photoshoot : Node
             return;
         }
         var savePath = _subject.GetSavePath();
-        if (string.IsNullOrEmpty(savePath)) return;
+        if (string.IsNullOrEmpty(savePath))
+        {
+            GD.PrintErr("[photoshoot] The subject has no save path");
+            return;
+        }
 
         await ToSignal(RenderingServer.Singleton, RenderingServer.SignalName.FramePostDraw);
         var img = viewport.GetTexture().GetImage();
@@ -224,5 +244,19 @@ public partial class Photoshoot : Node
             System.IO.Directory.CreateDirectory(dir);
         var err = img.SavePng(absPath);
         GD.Print($"[photoshoot] save {absPath} => {err}");
+        if (err == Error.Ok) ReimportInEditor(savePath);
+    }
+
+    // The editor only notices a file its own process wrote when told: register
+    // the path and reimport it, which also reloads the texture anywhere it is
+    // in use.
+    private static void ReimportInEditor(string savePath)
+    {
+#if TOOLS
+        if (!Engine.IsEditorHint() || !savePath.StartsWith("res://")) return;
+        var fileSystem = EditorInterface.Singleton.GetResourceFilesystem();
+        fileSystem.UpdateFile(savePath);
+        fileSystem.ReimportFiles(new[] { savePath });
+#endif
     }
 }
