@@ -132,8 +132,8 @@ public partial class Photoshoot : Node
     }
 
     // Points the camera rig at the centre of everything visible under the model
-    // slot and backs the camera off along the rig's view direction until the
-    // subject's bounding sphere fits the view, with FitPadding to spare. The
+    // slot and backs the camera off along the rig's view direction until every
+    // corner of the subject's bounds is in view, with FitPadding to spare. The
     // rig's rotation (the viewing angle) is left alone, so set the angle first,
     // fit, then nudge by hand.
     public void FitCamera()
@@ -141,9 +141,10 @@ public partial class Photoshoot : Node
         var slot = ModelSlot;
         var rig = CameraRig;
         var camera = Camera;
-        if (slot == null || rig == null || camera == null)
+        var viewport = Viewport;
+        if (slot == null || rig == null || camera == null || viewport == null)
         {
-            GD.PrintErr("[photoshoot] Fit Camera needs %ModelSlot, %CameraRig and %Camera3D in the scene");
+            GD.PrintErr("[photoshoot] Fit Camera needs %SubViewport, %ModelSlot, %CameraRig and %Camera3D in the scene");
             return;
         }
         if (!TryGetBounds(slot, out Aabb bounds))
@@ -152,15 +153,31 @@ public partial class Photoshoot : Node
             return;
         }
 
-        float radius = Mathf.Max(bounds.Size.Length() / 2f, 0.001f);
-        float halfFov = Mathf.DegToRad(camera.Fov) / 2f;
-        float distance = radius / Mathf.Sin(halfFov) * FitPadding;
+        // The camera sits at (0, 0, d) in the rig's space looking down -Z, so a corner at rig-local
+        // (x, y, z) is (d - z) in front of it and must fit the frustum there: |y| within the vertical
+        // half angle, |x| within the horizontal one (Godot's fov is vertical; the aspect gives the
+        // horizontal). The distance is the largest any corner needs.
+        Vector3 centre = bounds.GetCenter();
+        Basis toRig = rig.GlobalBasis.Inverse();
+        float tanHalfV = Mathf.Tan(Mathf.DegToRad(camera.Fov) / 2f);
+        Vector2I size = viewport.Size;
+        float aspect = size.Y > 0 ? (float)size.X / size.Y : 1f;
+        float distance = 0f;
+        float depth = 0f;
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 corner = toRig * (bounds.GetEndpoint(i) - centre);
+            float lateral = Mathf.Max(Mathf.Abs(corner.Y), Mathf.Abs(corner.X) / aspect) * FitPadding;
+            distance = Mathf.Max(distance, corner.Z + lateral / tanHalfV);
+            depth = Mathf.Max(depth, Mathf.Abs(corner.Z));
+        }
+        distance = Mathf.Max(distance, 0.01f);
 
-        rig.GlobalPosition = bounds.GetCenter();
+        rig.GlobalPosition = centre;
         camera.Position = new Vector3(0f, 0f, distance);
-        camera.Near = Mathf.Min(camera.Near, distance / 10f);
-        camera.Far = Mathf.Max(camera.Far, distance + radius * 2f);
-        GD.Print($"[photoshoot] fit: centre {bounds.GetCenter()}, radius {radius:0.###}, distance {distance:0.###}");
+        camera.Near = Mathf.Min(camera.Near, Mathf.Max(distance - depth, 0.001f) / 2f);
+        camera.Far = Mathf.Max(camera.Far, distance + depth * 2f);
+        GD.Print($"[photoshoot] fit: centre {centre}, size {bounds.Size}, distance {distance:0.###}");
     }
 
     // The world-space box around every visible VisualInstance3D under root.

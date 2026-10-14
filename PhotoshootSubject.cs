@@ -27,25 +27,30 @@ public abstract partial class PhotoshootSubject : Resource
     }
 
     // Helper for LoadModel: instantiates scene into the slot. With stripScripts,
-    // every script in the instance is removed before it enters the tree, so a
-    // gameplay prefab (one whose _Ready looks up services, registers for picking,
-    // or hides parts of itself from game state) is photographed as plain meshes.
-    // Scripts without [Tool] never run in the editor anyway; this is for snapping
-    // from a running scene. Returns the instance, or null when the scene is null.
+    // what goes in the slot is a script-free copy of the instance (see
+    // StripScripts), so a gameplay prefab (one whose _Ready looks up services,
+    // registers for picking, or hides parts of itself from game state) is
+    // photographed as plain meshes. Scripts without [Tool] never run in the
+    // editor anyway; this is for snapping from a running scene. Returns the
+    // node put in the slot, or null when the scene is null.
     protected static Node3D InstantiateInto(Node3D modelSlot, PackedScene scene, bool stripScripts)
     {
         if (scene == null) return null;
         var instance = scene.Instantiate<Node3D>(PackedScene.GenEditState.Instance);
-        if (stripScripts) StripScripts(instance);
+        if (stripScripts) instance = StripScripts(instance);
         modelSlot.AddChild(instance);
         return instance;
     }
 
-    // Removes the script from node and every descendant.
-    protected static void StripScripts(Node node)
+    // A copy of node and its whole subtree with every script left out (nodes,
+    // properties, transforms and materials kept), and the original freed. A copy
+    // rather than set_script(null) in place: removing a C# script from a live
+    // node throws from Godot's bridge. The node must not be in the tree yet.
+    protected static Node3D StripScripts(Node3D node)
     {
-        if (node.GetScript().VariantType != Variant.Type.Nil) node.SetScript(new Variant());
-        foreach (Node child in node.GetChildren())
-            StripScripts(child);
+        const int withoutScripts = (int)(Node.DuplicateFlags.Signals | Node.DuplicateFlags.Groups);
+        var copy = (Node3D)node.Duplicate(withoutScripts);
+        node.Free();
+        return copy;
     }
 }
