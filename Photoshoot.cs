@@ -1,13 +1,17 @@
 using Godot;
 using System.Threading.Tasks;
 
-// Photoshoot: render a subject to PNG. Runs as a [Tool] so the configured
-// subject appears in the editor for framing, posing, and animation scrubbing.
-// Assign a PhotoshootSubject via the inspector (CharacterPhotoshootSubject,
-// ManualPhotoshootSubject, etc.), click Snap Picture to write the PNG at the
-// path the subject supplies. There is no runtime capture path — running the
-// scene only previews the model. Capture lives in the editor to ensure tweaked
-// poses aren't overwritten by AnimationPlayer autoplay.
+// Photoshoot: render a subject to PNG with a transparent background. Runs as a
+// [Tool] so the configured subject appears in the editor for framing, posing,
+// and animation scrubbing. Assign a PhotoshootSubject via the inspector
+// (ManualPhotoshootSubject, or one of your project's own subjects), frame the
+// shot (Fit Camera gives a starting point), click Snap Picture to write the PNG
+// at the path the subject supplies.
+//
+// Capture is meant to happen in the editor, so tweaked poses aren't overwritten
+// by AnimationPlayer autoplay. SnapPicture and FitCamera are public all the
+// same, so a project's batch script can run the scene and snap a list of
+// subjects without the editor.
 //
 // The instantiated model is owned by the scene root so its subtree is editable.
 [Tool]
@@ -26,6 +30,14 @@ public partial class Photoshoot : Node
             ReloadModel();
         }
     }
+
+    // Extra room left around the subject by Fit Camera, as a multiplier on the
+    // distance that would just fit its bounding sphere. 1 touches the edges.
+    [Export(PropertyHint.Range, "1,3,0.05")]
+    public float FitPadding { get; set; } = 1.15f;
+
+    [ExportToolButton("Fit Camera")]
+    public Callable FitCameraButton => Callable.From(FitCamera);
 
     [ExportToolButton("Snap Picture")]
     public Callable SnapPictureButton => Callable.From(() => _ = SnapPicture());
@@ -53,6 +65,28 @@ public partial class Photoshoot : Node
             if (_modelSlot == null && IsInsideTree())
                 _modelSlot = GetNodeOrNull<Node3D>("%ModelSlot");
             return _modelSlot;
+        }
+    }
+
+    private Node3D _cameraRig;
+    private Node3D CameraRig
+    {
+        get
+        {
+            if (_cameraRig == null && IsInsideTree())
+                _cameraRig = GetNodeOrNull<Node3D>("%CameraRig");
+            return _cameraRig;
+        }
+    }
+
+    private Camera3D _camera;
+    private Camera3D Camera
+    {
+        get
+        {
+            if (_camera == null && IsInsideTree())
+                _camera = GetNodeOrNull<Camera3D>("%Camera3D");
+            return _camera;
         }
     }
 
@@ -97,7 +131,63 @@ public partial class Photoshoot : Node
             SetOwnerRecursive(child, owner);
     }
 
-    private async Task SnapPicture()
+    // Points the camera rig at the centre of everything visible under the model
+    // slot and backs the camera off along the rig's view direction until the
+    // subject's bounding sphere fits the view, with FitPadding to spare. The
+    // rig's rotation (the viewing angle) is left alone, so set the angle first,
+    // fit, then nudge by hand.
+    public void FitCamera()
+    {
+        var slot = ModelSlot;
+        var rig = CameraRig;
+        var camera = Camera;
+        if (slot == null || rig == null || camera == null)
+        {
+            GD.PrintErr("[photoshoot] Fit Camera needs %ModelSlot, %CameraRig and %Camera3D in the scene");
+            return;
+        }
+        if (!TryGetBounds(slot, out Aabb bounds))
+        {
+            GD.PrintErr("[photoshoot] Nothing visible under the model slot to fit");
+            return;
+        }
+
+        float radius = Mathf.Max(bounds.Size.Length() / 2f, 0.001f);
+        float halfFov = Mathf.DegToRad(camera.Fov) / 2f;
+        float distance = radius / Mathf.Sin(halfFov) * FitPadding;
+
+        rig.GlobalPosition = bounds.GetCenter();
+        camera.Position = new Vector3(0f, 0f, distance);
+        camera.Near = Mathf.Min(camera.Near, distance / 10f);
+        camera.Far = Mathf.Max(camera.Far, distance + radius * 2f);
+        GD.Print($"[photoshoot] fit: centre {bounds.GetCenter()}, radius {radius:0.###}, distance {distance:0.###}");
+    }
+
+    // The world-space box around every visible VisualInstance3D under root.
+    private static bool TryGetBounds(Node root, out Aabb bounds)
+    {
+        bounds = default;
+        bool any = false;
+        Collect(root, ref bounds, ref any);
+        return any;
+
+        static void Collect(Node node, ref Aabb bounds, ref bool any)
+        {
+            if (node is VisualInstance3D visual && visual.IsVisibleInTree())
+            {
+                Aabb box = visual.GlobalTransform * visual.GetAabb();
+                bounds = any ? bounds.Merge(box) : box;
+                any = true;
+            }
+            foreach (Node child in node.GetChildren())
+                Collect(child, ref bounds, ref any);
+        }
+    }
+
+    // Renders the subject and writes the PNG where the subject says. Awaits the
+    // next drawn frame first, so a model loaded or a camera moved this frame is
+    // in the picture.
+    public async Task SnapPicture()
     {
         var viewport = Viewport;
         if (viewport == null) return;
